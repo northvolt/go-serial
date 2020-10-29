@@ -11,6 +11,7 @@ package serial
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -61,4 +62,43 @@ func TestDoubleCloseIsNoop(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, port.Close())
 	require.NoError(t, port.Close())
+}
+
+func TestSerialReadTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-time.After(10*time.Second)
+		panic("test timeout")
+	}()
+
+	cmd := exec.CommandContext(ctx,
+		"socat", "-d", "-d", "pty,raw,echo=0,link=/tmp/faketty", "STDIO")
+	serialInput, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	socatOutput, err := cmd.StderrPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	// Let our fake serial port node appear.
+	// socat will write to stderr before starting transfer phase;
+	// we don't really care what, just that it did, because then it's ready.
+	buf := make([]byte, 1024)
+	_, err = socatOutput.Read(buf)
+	require.NoError(t, err)
+	go cmd.Wait()
+	time.Sleep(3*time.Second)
+
+	port, err := Open("/tmp/faketty", &Mode{})
+	require.NoError(t, err)
+	go func() {
+		time.Sleep(100*time.Millisecond)
+		serialInput.Write([]byte("1\n"))
+	}()
+	_, err = port.ReadWithTimeout(make([]byte, 2), 500 * time.Millisecond)
+	require.NoError(t, err)
+
+	_, err = port.ReadWithTimeout(make([]byte, 2), 500 * time.Millisecond)
+	if !os.IsTimeout(err) {
+		t.Fatalf("expected timeout error, got: %s", err)
+	}
 }

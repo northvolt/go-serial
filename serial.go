@@ -6,6 +6,8 @@
 
 package serial
 
+import "time"
+
 //go:generate go run $GOROOT/src/syscall/mksyscall_windows.go -output zsyscall_windows.go syscall_windows.go
 
 // Port is the interface for a serial Port
@@ -20,9 +22,37 @@ type Port interface {
 	// the serial port or an error occurs.
 	Read(p []byte) (n int, err error)
 
+	// Stores data received from the serial port into the provided byte array
+	// buffer. The function returns the number of bytes read.
+	//
+	// Blocks until (at least) one byte is received from the serial port, or
+	// the given timeout expires, or an error occurs. The timeout error has
+	// method Timeout() which returns true.
+	//
+	// If the given timeout is zero or negative, the method returns a timeout
+	// error immediately.
+	//
+	// Note: on Windows, timeout is ignored at the moment.
+	ReadWithTimeout(p []byte, timeout time.Duration) (n int, err error)
+
 	// Send the content of the data byte array to the serial port.
 	// Returns the number of bytes written.
+	//
+	// Blocks until at least one byte is written or an error occurs.
 	Write(p []byte) (n int, err error)
+
+	// Send the content of the data byte array to the serial port.
+	// Returns the number of bytes written.
+	//
+	// Blocks until at least one byte is written, or the given timeout expires,
+	// or an error occurs. The timeout error has method Timeout() which returns
+	// true.
+	//
+	// If the given timeout is zero or negative, the method returns a timeout
+	// error immediately.
+	//
+	// Note: on Windows, timeout is ignored at the moment.
+	WriteWithTimeout(p []byte, timeout time.Duration) (n int, err error)
 
 	// ResetInputBuffer Purges port read buffer
 	ResetInputBuffer() error

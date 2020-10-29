@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.bug.st/serial/unixutils"
 	"golang.org/x/sys/unix"
@@ -55,15 +56,42 @@ func (port *unixPort) Close() error {
 }
 
 func (port *unixPort) Read(p []byte) (int, error) {
+	return port.read0(p, 0, false)
+}
+
+func (port *unixPort) ReadWithTimeout(p []byte, timeout time.Duration) (int, error) {
+	return port.read0(p, timeout, true)
+}
+
+func (port *unixPort) read0(p []byte, timeout time.Duration, useTimeout bool) (int, error) {
 	port.closeLock.RLock()
 	defer port.closeLock.RUnlock()
 	if atomic.LoadUint32(&port.opened) != 1 {
 		return 0, &PortError{code: PortClosed}
 	}
 
+	if useTimeout && timeout <= 0 {
+		return 0, newReadTimeoutErr(timeout)
+	}
+	start := time.Now()
 	fds := unixutils.NewFDSet(port.handle, port.closeSignal.ReadFD())
-	for {
-		res, err := unixutils.Select(fds, nil, fds, -1)
+	for firstAttempt := true; ; firstAttempt = false {
+		var remainingTimeout time.Duration
+		if useTimeout {
+			if firstAttempt {
+				// Ensure we call select at least once even if some time passed
+				// `start` is initialised.
+				remainingTimeout = timeout
+			} else {
+				remainingTimeout = start.Add(timeout).Sub(time.Now())
+				if remainingTimeout <= 0 {
+					return 0, newReadTimeoutErr(timeout)
+				}
+			}
+		} else {
+			remainingTimeout = -1
+		}
+		res, err := unixutils.Select(fds, nil, fds, remainingTimeout)
 		if err == unix.EINTR {
 			continue
 		}
@@ -73,23 +101,80 @@ func (port *unixPort) Read(p []byte) (int, error) {
 		if res.IsReadable(port.closeSignal.ReadFD()) {
 			return 0, &PortError{code: PortClosed}
 		}
+		if !res.IsReadable(port.handle) {
+			return 0, newReadTimeoutErr(timeout)
+		}
 		n, err := unix.Read(port.handle, p)
 		if err == unix.EINTR {
 			continue
 		}
-		if n < 0 { // Do not return -1 unix errors
-			n = 0
+		if err != nil {
+			return 0, err
 		}
-		return n, err
+		return n, nil
 	}
 }
 
 func (port *unixPort) Write(p []byte) (n int, err error) {
-	n, err = unix.Write(port.handle, p)
-	if n < 0 { // Do not return -1 unix errors
-		n = 0
+	return port.write0(p, 0, false)
+}
+
+func (port *unixPort) WriteWithTimeout(p []byte, timeout time.Duration) (int, error) {
+	return port.write0(p, timeout, true)
+}
+
+func (port *unixPort) write0(p []byte, timeout time.Duration, useTimeout bool) (int, error) {
+	port.closeLock.RLock()
+	defer port.closeLock.RUnlock()
+	if atomic.LoadUint32(&port.opened) != 1 {
+		return 0, &PortError{code: PortClosed}
 	}
-	return
+
+	if useTimeout && timeout <= 0 {
+		return 0, newWriteTimeoutErr(timeout)
+	}
+	start := time.Now()
+	readFDs := unixutils.NewFDSet(port.closeSignal.ReadFD())
+	writeFDs := unixutils.NewFDSet(port.handle)
+	allFDs := unixutils.NewFDSet(port.handle, port.closeSignal.ReadFD())
+	for firstAttempt := true; ; firstAttempt = false {
+		var remainingTimeout time.Duration
+		if useTimeout {
+			if firstAttempt {
+				// Ensure we call select at least once even if some time passed
+				// `start` is initialised.
+				remainingTimeout = timeout
+			} else {
+				remainingTimeout = start.Add(timeout).Sub(time.Now())
+				if remainingTimeout <= 0 {
+					return 0, newWriteTimeoutErr(timeout)
+				}
+			}
+		} else {
+			remainingTimeout = -1
+		}
+		res, err := unixutils.Select(readFDs, writeFDs, allFDs, remainingTimeout)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if res.IsReadable(port.closeSignal.ReadFD()) {
+			return 0, &PortError{code: PortClosed}
+		}
+		if !res.IsWritable(port.handle) {
+			return 0, newWriteTimeoutErr(timeout)
+		}
+		n, err := unix.Write(port.handle, p)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
 }
 
 func (port *unixPort) ResetInputBuffer() error {

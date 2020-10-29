@@ -115,6 +115,10 @@ func (port *windowsPort) Read(p []byte) (int, error) {
 	}
 }
 
+func (port *windowsPort) ReadWithTimeout(p []byte, timeout time.Duration) (int, error) {
+	return port.Read(p)
+}
+
 func (port *windowsPort) Write(p []byte) (int, error) {
 	var writed uint32
 	ev, err := createOverlappedEvent()
@@ -128,6 +132,10 @@ func (port *windowsPort) Write(p []byte) (int, error) {
 		err = getOverlappedResult(port.handle, ev, &writed, true)
 	}
 	return int(writed), err
+}
+
+func (port *windowsPort) WriteWithTimeout(p []byte, timeout time.Duration) (int, error) {
+	return port.Write(p)
 }
 
 const (
