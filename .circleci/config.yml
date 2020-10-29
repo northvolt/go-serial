@@ -1,0 +1,18 @@
+version: 2.1
+
+jobs:
+  build:
+    docker:
+      - image: cimg/go:1.15
+    steps:
+      - run:
+          name: install socat
+          command: sudo apt-get update -y && sudo apt-get install -y socat
+      - checkout
+      - run: go test -v ./...
+      - run: GOARCH=amd64 go build -v ./...
+
+workflows:
+  build:
+    jobs:
+      - build
