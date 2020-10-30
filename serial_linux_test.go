@@ -88,7 +88,7 @@ func TestSerialReadTimeout(t *testing.T) {
 	go cmd.Wait()
 	time.Sleep(3*time.Second)
 
-	port, err := Open("/tmp/faketty", &Mode{})
+	port, err := Open("/tmp/faketty", &Mode{ReadTimeout: 500 * time.Millisecond})
 	require.NoError(t, err)
 	go func() {
 		time.Sleep(100*time.Millisecond)
@@ -97,6 +97,12 @@ func TestSerialReadTimeout(t *testing.T) {
 	_, err = port.ReadWithTimeout(make([]byte, 2), 500 * time.Millisecond)
 	require.NoError(t, err)
 
+	_, err = port.ReadWithTimeout(make([]byte, 2), 500 * time.Millisecond)
+	if !os.IsTimeout(err) {
+		t.Fatalf("expected timeout error, got: %s", err)
+	}
+
+	port.(*unixPort).emulateSpuriousSelectWakeup = true
 	_, err = port.ReadWithTimeout(make([]byte, 2), 500 * time.Millisecond)
 	if !os.IsTimeout(err) {
 		t.Fatalf("expected timeout error, got: %s", err)

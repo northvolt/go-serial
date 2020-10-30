@@ -9,6 +9,8 @@
 package serial
 
 import (
+	"errors"
+	"fmt"
 	"io/ioutil"
 	"regexp"
 	"strings"
@@ -23,9 +25,13 @@ import (
 type unixPort struct {
 	handle int
 
+	termReadTimeout time.Duration
+
 	closeLock   sync.RWMutex
 	closeSignal *unixutils.Pipe
 	opened      uint32
+
+	emulateSpuriousSelectWakeup bool
 }
 
 func (port *unixPort) Close() error {
@@ -101,7 +107,7 @@ func (port *unixPort) read0(p []byte, timeout time.Duration, useTimeout bool) (i
 		if res.IsReadable(port.closeSignal.ReadFD()) {
 			return 0, &PortError{code: PortClosed}
 		}
-		if !res.IsReadable(port.handle) {
+		if useTimeout && !port.emulateSpuriousSelectWakeup && !res.IsReadable(port.handle) {
 			return 0, newReadTimeoutErr(timeout)
 		}
 		n, err := unix.Read(port.handle, p)
@@ -110,6 +116,23 @@ func (port *unixPort) read0(p []byte, timeout time.Duration, useTimeout bool) (i
 		}
 		if err != nil {
 			return 0, err
+		}
+		// If read timeout is set, zero bytes can be read.
+		if n == 0 {
+			if port.termReadTimeout == 0 {
+				// Must never happen, see see http://unixwiz.net/techtips/termios-vmin-vtime.html
+				return 0, errors.New("0 bytes read from port")
+			}
+			if useTimeout {
+				// termReadTimeout might be smaller than the `timeout` used in this method, continue
+				// to the next iteration to verify.
+				continue
+			} else {
+				return 0, newReadTimeoutErr(port.termReadTimeout)
+			}
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("unrecognised read error, return code %d", n)
 		}
 		return n, nil
 	}
@@ -163,15 +186,26 @@ func (port *unixPort) write0(p []byte, timeout time.Duration, useTimeout bool) (
 		if res.IsReadable(port.closeSignal.ReadFD()) {
 			return 0, &PortError{code: PortClosed}
 		}
-		if !res.IsWritable(port.handle) {
+		if useTimeout && !res.IsWritable(port.handle) {
 			return 0, newWriteTimeoutErr(timeout)
 		}
+		// TODO this can still block, despite select says the port is writable.
 		n, err := unix.Write(port.handle, p)
 		if err == unix.EINTR {
 			continue
 		}
 		if err != nil {
 			return 0, err
+		}
+		if n == 0 {
+			if useTimeout {
+				continue
+			} else {
+				return 0, errors.New("0 bytes written to port")
+			}
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("unrecognised write error, return code %d", n)
 		}
 		return n, nil
 	}
@@ -202,6 +236,10 @@ func (port *unixPort) SetMode(mode *Mode) error {
 	if err := setTermSettingsStopBits(mode.StopBits, settings); err != nil {
 		return err
 	}
+	if err := setTermTimeouts(mode.ReadTimeout, settings); err != nil {
+		return err
+	}
+	port.termReadTimeout = mode.ReadTimeout
 	return port.setTermSettings(settings)
 }
 
@@ -465,10 +503,30 @@ func setRawMode(settings *unix.Termios) {
 	settings.Iflag &^= tcIUCLC
 
 	settings.Oflag &^= unix.OPOST
+}
 
-	// Block reads until at least one char is available (no timeout)
-	settings.Cc[unix.VMIN] = 1
-	settings.Cc[unix.VTIME] = 0
+func setTermTimeouts(readTimeout time.Duration, settings *unix.Termios) error {
+	if readTimeout < 0 {
+		return &PortError{code: InvalidTimeoutValue}
+	}
+	// See see http://unixwiz.net/techtips/termios-vmin-vtime.html
+	var vmin, vtime uint8
+	if readTimeout > 0 {
+		vmin = 0
+		vtime = uint8(readTimeout.Milliseconds() / 100)
+		if vtime < 1 || vtime > 255 {
+			return &PortError{code: InvalidTimeoutValue}
+		}
+	} else {
+		// Block reads until at least one char is available (no timeout)
+		vmin = 1
+		vtime = 0
+	}
+
+	settings.Cc[unix.VMIN] = vmin
+	settings.Cc[unix.VTIME] = vtime
+
+	return nil
 }
 
 // native syscall wrapper functions
